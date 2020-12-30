@@ -1,0 +1,10 @@
+[package]
+name = "salamander"
+version = "0.1.0"
+authors = ["Andrew Hilton <anhilton@silabs.com>"]
+edition = "2018"
+repository = "https://github.com/AndHilton/salamander"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
