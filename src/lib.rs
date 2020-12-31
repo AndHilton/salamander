@@ -4,6 +4,6 @@
 
 mod salamander_packets;
 
-pub use crate::salamander_packets::packet_handle::PacketHandle;
+pub use crate::salamander_packets::PacketHandle;
 
 pub fn foo() {}
