@@ -1,5 +1,6 @@
 pub use packet_handle::PacketHandle;
 
+#[allow(dead_code)]
 pub enum PacketError {
     BadArgument,
     MemoryError,
@@ -70,14 +71,36 @@ pub mod packet_protocol {
         fn is_valid(self, len: usize) -> bool;
     }
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub enum BasePacketKind {
         Base,
         End,
         Any,
     }
 
-    #[derive(Clone, Copy)]
+    impl PacketKind for BasePacketKind {
+        fn max(self) -> usize {
+            match self {
+                BasePacketKind::Base => MAX_PACKET,
+                BasePacketKind::Any => MAX_PACKET,
+                BasePacketKind::End => 0,
+            }
+        }
+
+        fn min(self) -> usize {
+            match self {
+                BasePacketKind::Base => 1,
+                BasePacketKind::Any => 1,
+                BasePacketKind::End => 0,
+            }
+        }
+
+        fn is_valid(self, len: usize) -> bool {
+           (self.min()..self.max()).contains(&len)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
     pub enum ZigBeePacketKind {
         MacFrame,
         MacHeader,
@@ -109,32 +132,21 @@ pub mod packet_protocol {
         Mic
     }
 
-    impl PacketKind for BasePacketKind {
-        fn max(self) -> usize {
-            match self {
-                BasePacketKind::Base => MAX_PACKET,
-                BasePacketKind::Any => MAX_PACKET,
-                BasePacketKind::End => 0,
-            }
-        }
-
-        fn min(self) -> usize {
-            match self {
-                BasePacketKind::Base => 1,
-                BasePacketKind::Any => 1,
-                BasePacketKind::End => 0,
-            }
-        }
-
-        fn is_valid(self, len: usize) -> bool {
-           (self.min()..self.max()).contains(&len)
-        }
-    }
-
     // TODO this should be parameterized to allow users to implement their own protocols
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug)]
     pub enum ProtocolPacketKind {
         Base(BasePacketKind),
+    }
+
+    #[allow(irrefutable_let_patterns)]
+    impl PartialEq<BasePacketKind> for ProtocolPacketKind {
+        fn eq(&self, other: &BasePacketKind) -> bool {
+            if let Self::Base(kind) = self {
+                kind == other
+            } else {
+                false
+            }
+        }
     }
 
 }
@@ -142,7 +154,11 @@ pub mod packet_protocol {
 #[allow(dead_code)]
 pub mod packet_view {
 
+    pub use crate::salamander_packets::PacketError;
+
     use crate::salamander_packets::packet_protocol::ProtocolPacketKind;
+    use crate::salamander_packets::packet_protocol::BasePacketKind;
+    use std::rc::Rc;
 
     ///
     /// PacketViews represent the discrete segments that comprise a ZigBee Packet.
@@ -150,6 +166,7 @@ pub mod packet_view {
     /// identify the relevant protocol layer.  Optionally, we can link PacketViews
     /// together in order to traverse the packet header by header.
     ///
+    #[derive(Clone)]
     pub struct PacketView {
         kind: ProtocolPacketKind,
         len: usize,
@@ -159,7 +176,54 @@ pub mod packet_view {
         data: ViewData,
     }
 
-    type ViewLink = Option<Box<PacketView>>;
+    pub type ViewLink = Option<Rc<PacketView>>;
+
+    pub type ViewData = Option<packet_data_sources::PacketViewSource>;
+
+    impl PacketView {
+        pub fn new_view(opt_kind: Option<ProtocolPacketKind>, len: usize) -> PacketView {
+            let kind = opt_kind.unwrap_or(ProtocolPacketKind::Base(BasePacketKind::Any));
+            PacketView {
+                kind,
+                len,
+                done: false,
+                left: None,
+                right: None,
+                data: None,
+            }
+        }
+    }
+
+    impl PacketView {
+
+        pub fn source_data_from_vec(&mut self, data_vec: Vec<u8>) -> Option<PacketError> {
+            if self.data.is_some() {
+                panic!()
+            } else {
+                let vec_source = packet_data_sources::ViewSourceVec::take_data(0, data_vec);
+                self.data = Some(vec_source)
+            }
+            None
+        }
+
+        pub fn set_left(&mut self, opt_link: ViewLink) -> Option<PacketError> {
+            if let Some(link) = opt_link {
+                self.left = Some(Rc::clone(&link))
+            } else {
+                self.left = None
+            }
+            None
+        }
+
+        pub fn set_right(&mut self, opt_link: ViewLink) -> Option<PacketError> {
+            if let Some(link) = opt_link {
+                self.right = Some(Rc::clone(&link))
+            } else {
+                self.right = None
+            }
+            None
+        }
+    }
 
     impl PacketView {
         pub fn kind(&self) -> ProtocolPacketKind {
@@ -198,13 +262,13 @@ pub mod packet_view {
         }
     }
 
-    pub type ViewData = Option<packet_data_sources::PacketViewSource>;
-
     mod packet_data_sources {
+
+        #[derive(Clone)]
         pub enum PacketViewSource {
             // SliceView(PacketSourceSlice),
-            VecView(PacketSourceVec),
-            BoxView(PacketSourceBox),
+            VecView(ViewSourceVec),
+            BoxView(ViewSourceBox),
         }
 
         impl PacketViewSource {
@@ -216,23 +280,44 @@ pub mod packet_view {
                     PacketViewSource::VecView(data_vec) => {
                         &data_vec.data[data_vec.index .. len ]
                     }
-                    // _ => unimplemented!(),
                 }
             }
         }
 
         // trait for getting data
-        // pub trait PacketSource {
-        //     fn as_slice(&self) -> &[u8];
-        //     fn index(&self) -> usize;
-        // }
+        pub trait PacketSource {
+            type Source;
+            // fn borrow_data(index: usize, data:Source) -> PacketViewSource;
+            fn take_data<T>(index: usize, data: T) -> PacketViewSource;
 
-        pub struct PacketSourceVec {
+            fn as_slice(&self) -> &[u8];
+            fn index(&self) -> usize;
+        }
+
+        #[derive(Clone)]
+        pub struct ViewSourceRef <'a> {
+            index: usize,
+            data: &'a[u8],
+        }
+
+        #[derive(Clone)]
+        pub struct ViewSourceVec {
             index: usize,
             data: Vec<u8>,
         }
 
-        pub struct PacketSourceBox {
+        impl ViewSourceVec {
+            pub fn take_data(index: usize, data: Vec<u8>) -> PacketViewSource {
+                let source = ViewSourceVec {
+                    index,
+                    data,
+                };
+                PacketViewSource::VecView(source)
+            }
+        }
+
+        #[derive(Clone)]
+        pub struct ViewSourceBox {
             index: usize,
             data: Box<[u8]>,
         }
@@ -241,7 +326,27 @@ pub mod packet_view {
 }
 
 
-// #[cfg(test)]
-// mod tests {
+#[cfg(test)]
+mod tests {
 
-// }
+    use crate::salamander_packets::*;
+    // use packet_handle::*;
+    use packet_protocol::*;
+    use packet_view::*;
+
+
+    #[test]
+    fn basic_view_from_vector() {
+        let test_string = String::from("Testing");
+        let len = test_string.len();
+        let mut view = PacketView::new_view(None, len);
+        assert_eq!(view.kind(), BasePacketKind::Any);
+        assert_eq!(view.len(), len);
+        let data_vec = Vec::from(String::clone(&test_string));
+        view.source_data_from_vec(data_vec);
+        assert!(view.data().is_some());
+        let view_slice = view.data().unwrap_or_else(|| panic!());
+        assert_eq!(view_slice, test_string.as_bytes());
+    }
+
+}
